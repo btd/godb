@@ -54,7 +54,7 @@ var key = map[string]itemType{
 	"select": itemSelect,
 	"from":   itemFrom,
 	";":      itemSemicolon,
-	",":      itemSemicolon,
+	",":      itemComma,
 }
 
 const eof = -1
@@ -182,19 +182,17 @@ func (l *lexer) run(start stateFn) {
 }
 
 func lexStartStatement(l *lexer) stateFn {
-	fmt.Println("lexStartStatement")
+	l.skipWhitespace()
 	switch r := l.next(); {
 	case r == eof:
 		return l.errorf("not finished statement")
-	case isSpace(r) || isEndOfLine(r):
-		// nothing spaces before first keyword like SELECT
+
 	case r == 's' || r == 'S':
 		l.backup()
-		return lexSelect
+		return lexSelectKeyword
 	default:
-		return l.errorf("unrecognized character in action: %#U", r)
+		return l.errorf("unrecognized character at start of statement: %#U", r)
 	}
-	return lexStartStatement
 }
 
 func createLexKeyword(keyword string, it itemType, nextAction stateFn) stateFn {
@@ -202,13 +200,12 @@ func createLexKeyword(keyword string, it itemType, nextAction stateFn) stateFn {
 	upper := []rune(strings.ToUpper(keyword))
 
 	return func(l *lexer) stateFn {
-		l.start = l.pos
-		fmt.Printf("lexKeyword %v\n", keyword)
+		l.skipWhitespace()
 		for index, lowerCaseRune := range lower {
 			upperCaseRune := upper[index]
 			r := l.next()
 			if !(r == lowerCaseRune || r == upperCaseRune) {
-				return l.errorf("expected %c or %c at pos %v in keyword %v, but got %c", lowerCaseRune, upperCaseRune, index, keyword, r)
+				return l.errorf("expected %c or %c at pos %v in keyword %v, but got <%c>", lowerCaseRune, upperCaseRune, index, keyword, r)
 			}
 		}
 		l.emit(it)
@@ -216,12 +213,90 @@ func createLexKeyword(keyword string, it itemType, nextAction stateFn) stateFn {
 	}
 }
 
-var lexSelect = createLexKeyword("select", itemSelect, lexSelectList)
+var lexSelectKeyword = createLexKeyword("select", itemSelect, lexSelectList)
+var lexFromKeyword = createLexKeyword("from", itemFrom, lexFromTableName)
 
 func lexSelectList(l *lexer) stateFn {
-	fmt.Println("lexSelectList")
-	l.emit(itemEOF)
+	l.skipWhitespace()
+	switch r := l.next(); {
+	case r == '*':
+		l.emit(itemStar)
+		return lexFromKeyword
+	case isAlpha(r):
+		l.backup()
+		return lexColumnsList
+	default:
+		return l.errorf("unrecognized character at select list: %#U", r)
+	}
+}
+
+func lexColumnsList(l *lexer) stateFn {
+	l.skipWhitespace()
+
+	if !l.scanIdentifier() {
+		return l.errorf("bad identifier: %q", l.input[l.start:l.pos])
+	}
+	l.emit(itemIdentifier)
+	return lexColumnsListContinue
+}
+
+func lexColumnsListContinue(l *lexer) stateFn {
+	l.skipWhitespace()
+	switch r := l.next(); {
+	case r == eof:
+		return l.errorf("not finished statement")
+	case r == ',':
+		l.emit(itemComma)
+		return lexColumnsList
+	case r == 'f' || r == 'F':
+		l.backup()
+		return lexFromKeyword
+	default:
+		return l.errorf("unrecognized character at continue select list: %#U", r)
+	}
+}
+
+func lexFromTableName(l *lexer) stateFn {
+	l.skipWhitespace()
+	if !l.scanIdentifier() {
+		return l.errorf("bad identifier: %q", l.input[l.start:l.pos])
+	}
+	l.emit(itemIdentifier)
+	return lexEndOfStatement
+}
+
+func lexEndOfStatement(l *lexer) stateFn {
+	l.skipWhitespace()
+	if l.accept(";") {
+		l.emit(itemEOF)
+	} else {
+		return l.errorf("unterminated statement")
+	}
+
 	return nil
+}
+
+func (l *lexer) scanIdentifier() bool {
+	chars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+	charsAndDigits := chars + "0123456789"
+	// first character should not contain digits
+	if !l.accept(chars) {
+		return false
+	}
+	// next could be anything
+	l.acceptRun(charsAndDigits)
+	// Next thing mustn't be alphanumeric.
+
+	if isAlphaNumeric(l.peek()) {
+		l.next()
+		return false
+	}
+	return true
+}
+
+func (l *lexer) skipWhitespace() {
+	l.acceptRun(spaceChars)
+	l.start = l.pos
 }
 
 // isSpace reports whether r is a space character.
@@ -239,11 +314,25 @@ func isAlphaNumeric(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-func main() {
-	l := lex("TEST SELECTS", "update")
+func isAlpha(r rune) bool {
+	return r == '_' || unicode.IsLetter(r)
+}
 
-	fmt.Println(l.nextItem())
-	fmt.Println(l.nextItem())
-	fmt.Println(l.nextItem())
-	fmt.Println(l.nextItem())
+func main() {
+	l := lex("TEST SELECTS", " sElect col  , col, from table;")
+
+read:
+	for {
+		switch i := l.nextItem(); {
+		case i.typ == itemError:
+			fmt.Println("ERROR", i)
+			break read
+		case i.typ == itemEOF:
+			fmt.Println("END")
+			break read
+		default:
+			fmt.Printf("%v %v\n", i, i.typ)
+		}
+	}
+
 }
