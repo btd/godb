@@ -255,7 +255,7 @@ func lexValueExprList(l *lexer) stateFn {
 		l.backup()
 		return lexFromKeyword
 	default:
-		return l.errorf("unrecognized character after value exrt: %#U", r)
+		return l.errorf("unrecognized character after value expr: %#U", r)
 	}
 }
 
