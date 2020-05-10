@@ -41,6 +41,8 @@ const (
 
 	itemEOF
 	itemIdentifier
+	itemString
+	itemNumber
 	itemKeyword
 	itemComma
 	itemStar
@@ -213,46 +215,47 @@ func createLexKeyword(keyword string, it itemType, nextAction stateFn) stateFn {
 	}
 }
 
-var lexSelectKeyword = createLexKeyword("select", itemSelect, lexSelectList)
+var lexSelectKeyword = createLexKeyword("select", itemSelect, lexValueExprList)
 var lexFromKeyword = createLexKeyword("from", itemFrom, lexFromTableName)
 
-func lexSelectList(l *lexer) stateFn {
+func lexValueExprList(l *lexer) stateFn {
 	l.skipWhitespace()
 	switch r := l.next(); {
 	case r == '*':
 		l.emit(itemStar)
-		return lexFromKeyword
+	case r == '\'':
+		l.backup()
+		if !l.scanString() {
+			return l.errorf("bad string: %q", l.input[l.start:l.pos])
+		}
+		l.emit(itemString)
+	case r == '+' || r == '-' || ('0' <= r && r <= '9'):
+		l.backup()
+		if !l.scanNumber() {
+			return l.errorf("bad number: %q", l.input[l.start:l.pos])
+		}
+		l.emit(itemNumber)
 	case isAlpha(r):
 		l.backup()
-		return lexColumnsList
+		if !l.scanIdentifier() {
+			return l.errorf("bad identifier: %q", l.input[l.start:l.pos])
+		}
+		l.emit(itemIdentifier)
 	default:
-		return l.errorf("unrecognized character at select list: %#U", r)
+		return l.errorf("unrecognized character at value exrt: %#U", r)
 	}
-}
 
-func lexColumnsList(l *lexer) stateFn {
 	l.skipWhitespace()
 
-	if !l.scanIdentifier() {
-		return l.errorf("bad identifier: %q", l.input[l.start:l.pos])
-	}
-	l.emit(itemIdentifier)
-	return lexColumnsListContinue
-}
-
-func lexColumnsListContinue(l *lexer) stateFn {
-	l.skipWhitespace()
 	switch r := l.next(); {
-	case r == eof:
-		return l.errorf("not finished statement")
 	case r == ',':
 		l.emit(itemComma)
-		return lexColumnsList
+		return lexValueExprList
 	case r == 'f' || r == 'F':
 		l.backup()
 		return lexFromKeyword
 	default:
-		return l.errorf("unrecognized character at continue select list: %#U", r)
+		return l.errorf("unrecognized character after value exrt: %#U", r)
 	}
 }
 
@@ -299,6 +302,67 @@ func (l *lexer) skipWhitespace() {
 	l.start = l.pos
 }
 
+func (l *lexer) scanNumber() bool {
+	// Optional leading sign.
+	l.accept("+-")
+	// Is it hex?
+	digits := "0123456789_"
+	if l.accept("0") {
+		// Note: Leading 0 does not mean octal in floats.
+		if l.accept("xX") {
+			digits = "0123456789abcdefABCDEF_"
+		} else if l.accept("oO") {
+			digits = "01234567_"
+		} else if l.accept("bB") {
+			digits = "01_"
+		}
+	}
+	l.acceptRun(digits)
+	if l.accept(".") {
+		l.acceptRun(digits)
+	}
+	if len(digits) == 10+1 && l.accept("eE") {
+		l.accept("+-")
+		l.acceptRun("0123456789_")
+	}
+	if len(digits) == 16+6+1 && l.accept("pP") {
+		l.accept("+-")
+		l.acceptRun("0123456789_")
+	}
+	// Is it imaginary?
+	l.accept("i")
+	// Next thing mustn't be alphanumeric.
+	if isAlphaNumeric(l.peek()) {
+		l.next()
+		return false
+	}
+	return true
+}
+
+func (l *lexer) scanString() bool {
+	if r := l.next(); r != '\'' {
+		l.backup()
+		return false
+	}
+	for {
+		switch l.next() {
+		case '\\':
+			if r := l.next(); r != eof && r != '\n' {
+				break
+			}
+			fallthrough
+		case eof, '\n':
+			return false
+		case '\'':
+			if r := l.next(); r != '\'' {
+				l.backup()
+				return true
+			}
+
+		}
+	}
+}
+
 // isSpace reports whether r is a space character.
 func isSpace(r rune) bool {
 	return r == ' ' || r == '\t'
@@ -318,8 +382,12 @@ func isAlpha(r rune) bool {
 	return r == '_' || unicode.IsLetter(r)
 }
 
+func isDigit(r rune) bool {
+	return ('0' <= r && r <= '9')
+}
+
 func main() {
-	l := lex("TEST SELECTS", " sElect col  , col, from table;")
+	l := lex("TEST SELECTS", " sElect col  , col, 11, 'ab''c' from table;")
 
 read:
 	for {
